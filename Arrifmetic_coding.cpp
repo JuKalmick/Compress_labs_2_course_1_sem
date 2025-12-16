@@ -13,6 +13,30 @@ using std::ifstream;
 using std::ofstream;
 using std::string;
 
+/*
+Лабораторная работа 2: Арифметическое сжатие (целочисленная реализация)
+
+Формат выходного файла:
+1) magic (uint32)                — идентификатор формата
+2) origSize (uint32)             — размер исходных данных (в байтах)
+3) freq[256] (uint32 * 256)      — таблица частот по всем байтам
+4) encodedBitCount (uint64)      — число реально записанных битов
+5) bitstream                     — закодированные биты, упакованные в байты
+
+Кодирование:
+- по частотам строится cum (кумулятивные суммы),
+- поддерживается интервал [low, high] в диапазоне 32 бит,
+- интервал сужается для каждого символа,
+- нормализация позволяет выдавать биты по мере стабилизации интервала.
+
+Декодирование:
+- читается заголовок и восстанавливается cum,
+- из битового потока собирается value,
+- по value вычисляется scaled и выбирается следующий символ,
+- процесс повторяется, пока не восстановим origSize байт.
+*/
+
+/* Запись битов в файл: накапливаем 8 бит -> пишем 1 байт */
 class BitWriter {
 public:
     explicit BitWriter(ofstream& out) : out_(out) {}
@@ -24,12 +48,14 @@ public:
         if (bits_ == 8) flushByte();
     }
 
+    /* Дописываем нули до целого байта и сбрасываем остаток */
     void flushFinal() {
         if (bits_ == 0) return;
         buf_ <<= (8 - bits_);
         flushByte();
     }
 
+    /* Сколько бит реально записали в поток */
     uint64_t totalBits() const { return totalBits_; }
 
 private:
@@ -45,6 +71,7 @@ private:
     uint64_t totalBits_{0};
 };
 
+/* Чтение битов из файла: читаем байт и выдаём биты по одному */
 class BitReader {
 public:
     explicit BitReader(ifstream& in) : in_(in) {}
@@ -67,6 +94,7 @@ private:
     int bitsLeft_{0};
 };
 
+/* Чтение файла целиком в память */
 static bool readWholeFile(const string& path, std::vector<uint8_t>& data) {
     ifstream in(path, std::ios::binary);
     if (!in) return false;
@@ -81,11 +109,13 @@ static bool readWholeFile(const string& path, std::vector<uint8_t>& data) {
     return true;
 }
 
+/* Получение размера файла для расчёта коэффициента сжатия */
 static uint64_t fileSize(const string& path) {
     ifstream in(path, std::ios::binary | std::ios::ate);
     return in ? static_cast<uint64_t>(in.tellg()) : 0ULL;
 }
 
+/* Построение кумулятивных частот cum и total = сумма всех частот */
 static void buildCum(const array<uint32_t, 256>& freq,
                      array<uint32_t, 257>& cum,
                      uint32_t& total) {
@@ -98,6 +128,7 @@ static void buildCum(const array<uint32_t, 256>& freq,
     total = cum[256];
 }
 
+/* По значению scaled находим символ s: cum[s] <= scaled < cum[s+1] */
 static int findSymbol(uint32_t scaled, const array<uint32_t, 257>& cum) {
     for (int s = 0; s < 256; s++) {
         if (scaled < cum[s + 1]) return s;
@@ -105,10 +136,12 @@ static int findSymbol(uint32_t scaled, const array<uint32_t, 257>& cum) {
     return 255;
 }
 
+/* Сжатие (арифметическое кодирование) */
 static void compressArithmetic(const string& inPath, const string& outPath) {
     using clock = std::chrono::high_resolution_clock;
     auto t0 = clock::now();
 
+    /* 1) Читаем входной файл */
     std::vector<uint8_t> data;
     if (!readWholeFile(inPath, data)) {
         cerr << "Cannot open input: " << inPath << "\n";
@@ -119,9 +152,11 @@ static void compressArithmetic(const string& inPath, const string& outPath) {
         return;
     }
 
+    /* 2) Строим таблицу частот */
     array<uint32_t, 256> freq{};
     for (uint8_t b : data) freq[b]++;
 
+    /* 3) Строим cum и total */
     array<uint32_t, 257> cum{};
     uint32_t total = 0;
     buildCum(freq, cum, total);
@@ -130,6 +165,7 @@ static void compressArithmetic(const string& inPath, const string& outPath) {
         return;
     }
 
+    /* 4) Константы диапазона для 32-битного кодирования */
     constexpr uint32_t BITS = 32;
     constexpr uint64_t MAX_VALUE = (1ULL << BITS) - 1;
     constexpr uint64_t HALF = (MAX_VALUE / 2) + 1;
@@ -140,13 +176,14 @@ static void compressArithmetic(const string& inPath, const string& outPath) {
     uint64_t high = MAX_VALUE;
     uint32_t pending = 0;
 
+    /* 5) Открываем выходной файл и пишем заголовок + частоты */
     ofstream out(outPath, std::ios::binary);
     if (!out) {
         cerr << "Cannot create output: " << outPath << "\n";
         return;
     }
 
-    const uint32_t magic = 0x41524331;
+    const uint32_t magic = 0x41524331;          // идентификатор формата
     const uint32_t origSize = static_cast<uint32_t>(data.size());
 
     uint64_t encodedBitCount = 0;
@@ -155,11 +192,13 @@ static void compressArithmetic(const string& inPath, const string& outPath) {
     out.write(reinterpret_cast<const char*>(&origSize), sizeof(origSize));
     out.write(reinterpret_cast<const char*>(freq.data()), sizeof(uint32_t) * 256);
 
+    /* 6) Резервируем место под encodedBitCount (заполним после кодирования) */
     std::streampos bitCountPos = out.tellp();
     out.write(reinterpret_cast<const char*>(&encodedBitCount), sizeof(encodedBitCount));
 
     BitWriter bw(out);
 
+    /* Функция вывода “стабильного” бита + обработка pending (underflow) */
     auto outputBit = [&](bool bit) {
         bw.writeBit(bit);
         while (pending > 0) {
@@ -168,15 +207,18 @@ static void compressArithmetic(const string& inPath, const string& outPath) {
         }
     };
 
+    /* 7) Основной цикл кодирования по символам */
     for (uint8_t sym : data) {
         uint64_t range = high - low + 1;
         uint32_t s = sym;
 
+        /* Сужение интервала под символ s */
         uint64_t newHigh = low + (range * cum[s + 1]) / total - 1;
         uint64_t newLow  = low + (range * cum[s])     / total;
         low = newLow;
         high = newHigh;
 
+        /* Нормализация интервала и выдача битов */
         while (true) {
             if (high < HALF) {
                 outputBit(false);
@@ -197,17 +239,21 @@ static void compressArithmetic(const string& inPath, const string& outPath) {
         }
     }
 
+    /* 8) Финализация: вывод завершающих битов */
     pending++;
     if (low < QUARTER) outputBit(false);
     else outputBit(true);
 
+    /* 9) Закрываем битовый поток */
     bw.flushFinal();
 
+    /* 10) Записываем реальное число бит (encodedBitCount) в заголовок */
     encodedBitCount = bw.totalBits();
     out.seekp(bitCountPos);
     out.write(reinterpret_cast<const char*>(&encodedBitCount), sizeof(encodedBitCount));
     out.close();
 
+    /* 11) Статистика */
     auto t1 = clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
 
@@ -222,16 +268,19 @@ static void compressArithmetic(const string& inPath, const string& outPath) {
     cout << "Time: " << ms << " ms\n";
 }
 
+/* Распаковка (арифметическое декодирование) */
 static void decompressArithmetic(const string& inPath, const string& outPath) {
     using clock = std::chrono::high_resolution_clock;
     auto t0 = clock::now();
 
+    /* 1) Открываем входной файл */
     ifstream in(inPath, std::ios::binary);
     if (!in) {
         cerr << "Cannot open input: " << inPath << "\n";
         return;
     }
 
+    /* 2) Читаем заголовок */
     uint32_t magic = 0;
     uint32_t origSize = 0;
 
@@ -242,6 +291,7 @@ static void decompressArithmetic(const string& inPath, const string& outPath) {
         return;
     }
 
+    /* 3) Читаем таблицу частот и encodedBitCount */
     array<uint32_t, 256> freq{};
     in.read(reinterpret_cast<char*>(freq.data()), sizeof(uint32_t) * 256);
 
@@ -252,6 +302,7 @@ static void decompressArithmetic(const string& inPath, const string& outPath) {
         return;
     }
 
+    /* 4) Восстанавливаем cum и total */
     array<uint32_t, 257> cum{};
     uint32_t total = 0;
     buildCum(freq, cum, total);
@@ -260,6 +311,7 @@ static void decompressArithmetic(const string& inPath, const string& outPath) {
         return;
     }
 
+    /* 5) Константы диапазона */
     constexpr uint32_t BITS = 32;
     constexpr uint64_t MAX_VALUE = (1ULL << BITS) - 1;
     constexpr uint64_t HALF = (MAX_VALUE / 2) + 1;
@@ -273,6 +325,7 @@ static void decompressArithmetic(const string& inPath, const string& outPath) {
     BitReader br(in);
     uint64_t bitsRead = 0;
 
+    /* Чтение одного бита с учётом encodedBitCount (лишнее добиваем нулями) */
     auto readOneBit = [&]() -> uint64_t {
         bool bit = false;
         if (bitsRead < encodedBitCount && br.readBit(bit)) {
@@ -283,27 +336,34 @@ static void decompressArithmetic(const string& inPath, const string& outPath) {
         return 0ULL;
     };
 
+    /* 6) Инициализация value первыми 32 битами */
     for (uint32_t i = 0; i < BITS; i++) value = (value << 1) | readOneBit();
 
+    /* 7) Открываем выходной файл */
     ofstream out(outPath, std::ios::binary);
     if (!out) {
         cerr << "Cannot create output: " << outPath << "\n";
         return;
     }
 
+    /* 8) Основной цикл восстановления: ровно origSize байт */
     for (uint32_t produced = 0; produced < origSize; produced++) {
         uint64_t range = high - low + 1;
 
+        /* scaled показывает позицию value внутри [low, high] в шкале [0..total) */
         uint64_t scaled = ((value - low + 1) * total - 1) / range;
-        int sym = findSymbol(static_cast<uint32_t>(scaled), cum);
 
+        /* По scaled выбираем символ */
+        int sym = findSymbol(static_cast<uint32_t>(scaled), cum);
         out.put(static_cast<char>(static_cast<uint8_t>(sym)));
 
+        /* Обновляем интервал под найденный символ */
         uint64_t newHigh = low + (range * cum[sym + 1]) / total - 1;
         uint64_t newLow  = low + (range * cum[sym])     / total;
         low = newLow;
         high = newHigh;
 
+        /* Нормализация и подтягивание новых битов в value */
         while (true) {
             if (high < HALF) {
             } else if (low >= HALF) {
@@ -326,6 +386,7 @@ static void decompressArithmetic(const string& inPath, const string& outPath) {
 
     out.close();
 
+    /* 9) Время выполнения */
     auto t1 = clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
 
@@ -333,6 +394,7 @@ static void decompressArithmetic(const string& inPath, const string& outPath) {
     cout << "Time: " << ms << " ms\n";
 }
 
+/* Меню программы: выбор режима и ввод имён файлов */
 int main() {
     cout << "1) Compress (Arithmetic)\n2) Decompress (Arithmetic)\nChoose: ";
     int choice = 0;
@@ -350,26 +412,3 @@ int main() {
 
     return 0;
 }
-
-/*
-buildCum:
-- по массиву частот строит cum (префиксные суммы) и total (общее число байтов).
-- cum используется для перевода символа в интервал на оси вероятностей.
-
-compressArithmetic:
-- использует целочисленный диапазон 32 бита [0 .. 2^32-1].
-- для каждого символа сужает [low, high] по cum.
-- нормализация:
-  1) high < HALF  -> выводим 0
-  2) low  >= HALF -> выводим 1 и сдвигаем интервал вниз на HALF
-  3) low >= QUARTER и high < THREE_QUARTERS -> underflow, увеличиваем pending
-- pending хранит число “отложенных” битов, которые будут выведены инверсией после определения следующего стабильного бита.
-- в конце дописывает завершающие биты и сохраняет количество полезных бит encodedBitCount.
-
-decompressArithmetic:
-- читает заголовок и восстанавливает cum.
-- value инициализируется первыми 32 битами потока.
-- scaled вычисляет позицию value внутри текущего интервала и переводит её в диапазон [0..total).
-- по scaled выбирается символ (по cum), затем обновляются low/high и делается нормализация, подтягивая новые биты.
-- декодирование останавливается ровно после origSize байт.
-*/
