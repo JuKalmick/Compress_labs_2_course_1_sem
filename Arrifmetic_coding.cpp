@@ -1,4 +1,3 @@
-// lab2_arithmetic.cpp
 #include <array>
 #include <cstdint>
 #include <fstream>
@@ -17,24 +16,29 @@ using std::string;
 class BitWriter {
 public:
     explicit BitWriter(ofstream& out) : out_(out) {}
+
     void writeBit(bool b) {
         buf_ = (buf_ << 1) | (b ? 1 : 0);
         bits_++;
         totalBits_++;
         if (bits_ == 8) flushByte();
     }
+
     void flushFinal() {
         if (bits_ == 0) return;
         buf_ <<= (8 - bits_);
         flushByte();
     }
+
     uint64_t totalBits() const { return totalBits_; }
+
 private:
     void flushByte() {
         out_.put(static_cast<char>(buf_));
         buf_ = 0;
         bits_ = 0;
     }
+
     ofstream& out_;
     uint8_t buf_{0};
     int bits_{0};
@@ -44,6 +48,7 @@ private:
 class BitReader {
 public:
     explicit BitReader(ifstream& in) : in_(in) {}
+
     bool readBit(bool& bit) {
         if (bitsLeft_ == 0) {
             char c;
@@ -55,6 +60,7 @@ public:
         bitsLeft_--;
         return true;
     }
+
 private:
     ifstream& in_;
     uint8_t buf_{0};
@@ -64,11 +70,14 @@ private:
 static bool readWholeFile(const string& path, std::vector<uint8_t>& data) {
     ifstream in(path, std::ios::binary);
     if (!in) return false;
+
     in.seekg(0, std::ios::end);
     std::streamoff sz = in.tellg();
     in.seekg(0, std::ios::beg);
+
     data.resize(static_cast<size_t>(sz));
     if (sz > 0) in.read(reinterpret_cast<char*>(data.data()), sz);
+
     return true;
 }
 
@@ -90,7 +99,6 @@ static void buildCum(const array<uint32_t, 256>& freq,
 }
 
 static int findSymbol(uint32_t scaled, const array<uint32_t, 257>& cum) {
-    // linear search (256 max) is fine
     for (int s = 0; s < 256; s++) {
         if (scaled < cum[s + 1]) return s;
     }
@@ -122,7 +130,6 @@ static void compressArithmetic(const string& inPath, const string& outPath) {
         return;
     }
 
-    // 32-bit arithmetic coding range
     constexpr uint32_t BITS = 32;
     constexpr uint64_t MAX_VALUE = (1ULL << BITS) - 1;
     constexpr uint64_t HALF = (MAX_VALUE / 2) + 1;
@@ -139,20 +146,15 @@ static void compressArithmetic(const string& inPath, const string& outPath) {
         return;
     }
 
-    // Header
-    const uint32_t magic = 0x41524331; // "ARC1"
+    const uint32_t magic = 0x41524331;
     const uint32_t origSize = static_cast<uint32_t>(data.size());
 
-    // We'll write encodedBitCount later, remember position
     uint64_t encodedBitCount = 0;
 
     out.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
     out.write(reinterpret_cast<const char*>(&origSize), sizeof(origSize));
-
-    // freq table: store all 256 uint32 for simplicity (fast decode, bigger header)
     out.write(reinterpret_cast<const char*>(freq.data()), sizeof(uint32_t) * 256);
 
-    // placeholder for bit count
     std::streampos bitCountPos = out.tellp();
     out.write(reinterpret_cast<const char*>(&encodedBitCount), sizeof(encodedBitCount));
 
@@ -180,26 +182,27 @@ static void compressArithmetic(const string& inPath, const string& outPath) {
                 outputBit(false);
             } else if (low >= HALF) {
                 outputBit(true);
-                low -= HALF; high -= HALF;
+                low -= HALF;
+                high -= HALF;
             } else if (low >= QUARTER && high < THREE_QUARTERS) {
                 pending++;
-                low -= QUARTER; high -= QUARTER;
+                low -= QUARTER;
+                high -= QUARTER;
             } else {
                 break;
             }
+
             low <<= 1;
             high = (high << 1) | 1;
         }
     }
 
-    // Finish
     pending++;
     if (low < QUARTER) outputBit(false);
     else outputBit(true);
 
     bw.flushFinal();
 
-    // patch bit count
     encodedBitCount = bw.totalBits();
     out.seekp(bitCountPos);
     out.write(reinterpret_cast<const char*>(&encodedBitCount), sizeof(encodedBitCount));
@@ -231,10 +234,11 @@ static void decompressArithmetic(const string& inPath, const string& outPath) {
 
     uint32_t magic = 0;
     uint32_t origSize = 0;
+
     in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
     in.read(reinterpret_cast<char*>(&origSize), sizeof(origSize));
     if (!in || magic != 0x41524331) {
-        cerr << "Bad format / magic.\n";
+        cerr << "Bad format.\n";
         return;
     }
 
@@ -275,15 +279,11 @@ static void decompressArithmetic(const string& inPath, const string& outPath) {
             bitsRead++;
             return bit ? 1ULL : 0ULL;
         }
-        // if stream ended, pad with 0
         bitsRead++;
         return 0ULL;
     };
 
-    // init value with BITS
-    for (uint32_t i = 0; i < BITS; i++) {
-        value = (value << 1) | readOneBit();
-    }
+    for (uint32_t i = 0; i < BITS; i++) value = (value << 1) | readOneBit();
 
     ofstream out(outPath, std::ios::binary);
     if (!out) {
@@ -306,11 +306,14 @@ static void decompressArithmetic(const string& inPath, const string& outPath) {
 
         while (true) {
             if (high < HALF) {
-                // do nothing
             } else if (low >= HALF) {
-                low -= HALF; high -= HALF; value -= HALF;
+                low -= HALF;
+                high -= HALF;
+                value -= HALF;
             } else if (low >= QUARTER && high < THREE_QUARTERS) {
-                low -= QUARTER; high -= QUARTER; value -= QUARTER;
+                low -= QUARTER;
+                high -= QUARTER;
+                value -= QUARTER;
             } else {
                 break;
             }
@@ -325,6 +328,7 @@ static void decompressArithmetic(const string& inPath, const string& outPath) {
 
     auto t1 = clock::now();
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
     cout << "Decompressed OK\n";
     cout << "Time: " << ms << " ms\n";
 }
@@ -343,5 +347,29 @@ int main() {
     if (choice == 1) compressArithmetic(inFile, outFile);
     else if (choice == 2) decompressArithmetic(inFile, outFile);
     else cout << "Wrong choice\n";
+
     return 0;
 }
+
+/*
+buildCum:
+- по массиву частот строит cum (префиксные суммы) и total (общее число байтов).
+- cum используется для перевода символа в интервал на оси вероятностей.
+
+compressArithmetic:
+- использует целочисленный диапазон 32 бита [0 .. 2^32-1].
+- для каждого символа сужает [low, high] по cum.
+- нормализация:
+  1) high < HALF  -> выводим 0
+  2) low  >= HALF -> выводим 1 и сдвигаем интервал вниз на HALF
+  3) low >= QUARTER и high < THREE_QUARTERS -> underflow, увеличиваем pending
+- pending хранит число “отложенных” битов, которые будут выведены инверсией после определения следующего стабильного бита.
+- в конце дописывает завершающие биты и сохраняет количество полезных бит encodedBitCount.
+
+decompressArithmetic:
+- читает заголовок и восстанавливает cum.
+- value инициализируется первыми 32 битами потока.
+- scaled вычисляет позицию value внутри текущего интервала и переводит её в диапазон [0..total).
+- по scaled выбирается символ (по cum), затем обновляются low/high и делается нормализация, подтягивая новые биты.
+- декодирование останавливается ровно после origSize байт.
+*/

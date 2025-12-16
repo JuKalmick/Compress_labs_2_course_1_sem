@@ -1,4 +1,3 @@
-// lab1_huffman.cpp
 #include <array>
 #include <cstdint>
 #include <fstream>
@@ -24,7 +23,7 @@ struct Node {
 
 struct NodeCmp {
     bool operator()(const Node* a, const Node* b) const {
-        return a->freq > b->freq; // min-heap
+        return a->freq > b->freq;
     }
 };
 
@@ -38,25 +37,30 @@ static void freeTree(Node* n) {
 class BitWriter {
 public:
     explicit BitWriter(ofstream& out) : out_(out) {}
+
     void writeBit(bool b) {
         buffer_ = (buffer_ << 1) | (b ? 1 : 0);
         bits_++;
         if (bits_ == 8) flushByte();
     }
+
     void writeBitsFromString(const string& bits01) {
         for (char c : bits01) writeBit(c == '1');
     }
+
     void flushFinal() {
         if (bits_ == 0) return;
         buffer_ <<= (8 - bits_);
         flushByte();
     }
+
 private:
     void flushByte() {
         out_.put(static_cast<char>(buffer_));
         buffer_ = 0;
         bits_ = 0;
     }
+
     ofstream& out_;
     uint8_t buffer_{0};
     int bits_{0};
@@ -65,7 +69,7 @@ private:
 class BitReader {
 public:
     explicit BitReader(ifstream& in) : in_(in) {}
-    // returns false on EOF
+
     bool readBit(bool& bit) {
         if (bits_left_ == 0) {
             char c;
@@ -77,6 +81,7 @@ public:
         bits_left_--;
         return true;
     }
+
 private:
     ifstream& in_;
     uint8_t buffer_{0};
@@ -85,11 +90,12 @@ private:
 
 static void buildCodes(Node* n, string cur, array<string, 256>& codes) {
     if (!n) return;
+
     if (n->is_leaf) {
-        // Special case: single-symbol file -> empty code becomes "0"
         codes[n->ch] = cur.empty() ? "0" : cur;
         return;
     }
+
     buildCodes(n->left, cur + "0", codes);
     buildCodes(n->right, cur + "1", codes);
 }
@@ -110,8 +116,6 @@ static Node* buildHuffmanTree(const array<uint64_t, 256>& freq, uint16_t& unique
     }
 
     if (pq.empty()) return nullptr;
-
-    // If only one unique symbol: tree is single leaf
     if (pq.size() == 1) return pq.top();
 
     while (pq.size() > 1) {
@@ -123,19 +127,24 @@ static Node* buildHuffmanTree(const array<uint64_t, 256>& freq, uint16_t& unique
         parent->left = a;
         parent->right = b;
         parent->is_leaf = false;
+
         pq.push(parent);
     }
+
     return pq.top();
 }
 
 static bool readWholeFile(const string& path, std::vector<uint8_t>& data) {
     ifstream in(path, std::ios::binary);
     if (!in) return false;
+
     in.seekg(0, std::ios::end);
     std::streamoff sz = in.tellg();
     in.seekg(0, std::ios::beg);
+
     data.resize(static_cast<size_t>(sz));
     if (sz > 0) in.read(reinterpret_cast<char*>(data.data()), sz);
+
     return true;
 }
 
@@ -146,6 +155,7 @@ static uint64_t fileSize(const string& path) {
 
 static void encodeFile(const string& inPath, const string& outPath) {
     std::vector<uint8_t> data;
+
     if (!readWholeFile(inPath, data)) {
         cerr << "Cannot open input: " << inPath << "\n";
         return;
@@ -175,14 +185,13 @@ static void encodeFile(const string& inPath, const string& outPath) {
         return;
     }
 
-    // Header
-    const uint32_t magic = 0x48464631; // "HFF1"
+    const uint32_t magic = 0x48464631;
     const uint64_t origSize = static_cast<uint64_t>(data.size());
+
     out.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
     out.write(reinterpret_cast<const char*>(&origSize), sizeof(origSize));
     out.write(reinterpret_cast<const char*>(&uniqueCount), sizeof(uniqueCount));
 
-    // Frequency table (symbol + uint64 freq)
     for (int i = 0; i < 256; i++) {
         if (freq[i] > 0) {
             uint8_t sym = static_cast<uint8_t>(i);
@@ -191,12 +200,10 @@ static void encodeFile(const string& inPath, const string& outPath) {
         }
     }
 
-    // Body: bits
     BitWriter bw(out);
-    for (uint8_t b : data) {
-        bw.writeBitsFromString(codes[b]);
-    }
+    for (uint8_t b : data) bw.writeBitsFromString(codes[b]);
     bw.flushFinal();
+
     out.close();
 
     uint64_t inSz = static_cast<uint64_t>(data.size());
@@ -227,7 +234,7 @@ static void decodeFile(const string& inPath, const string& outPath) {
     in.read(reinterpret_cast<char*>(&uniqueCount), sizeof(uniqueCount));
 
     if (!in || magic != 0x48464631) {
-        cerr << "Bad format / magic.\n";
+        cerr << "Bad format.\n";
         return;
     }
 
@@ -254,12 +261,11 @@ static void decodeFile(const string& inPath, const string& outPath) {
         return;
     }
 
-    // Special case: single-symbol file
     if (root->is_leaf) {
         for (uint64_t i = 0; i < origSize; i++) out.put(static_cast<char>(root->ch));
         out.close();
         freeTree(root);
-        cout << "Decoded OK (single-symbol)\n";
+        cout << "Decoded OK\n";
         return;
     }
 
@@ -303,5 +309,6 @@ int main() {
     if (choice == 1) encodeFile(inFile, outFile);
     else if (choice == 2) decodeFile(inFile, outFile);
     else cout << "Wrong choice\n";
+
     return 0;
 }
